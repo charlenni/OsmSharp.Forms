@@ -43,7 +43,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="GettingStarted.Xamarin" />
-    <EmbeddedResource Include="Maps\tuebingen-regbez-latest.osm.pbf" />
     <EmbeddedResource Include="Maps\test.osm" />
     <None Include="packages.config" />
   </ItemGroup>
