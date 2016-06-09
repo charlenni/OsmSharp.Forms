@@ -20,6 +20,8 @@ using Plugin.Geolocator;
 using Plugin.Geolocator.Abstractions;
 using OsmSharp.Math.Geo;
 using OsmSharp.UI.Animations;
+using OsmSharp.Units.Angle;
+using OsmSharp.Osm.Streams.Filters;
 
 namespace OsmSharp.Forms
 {
@@ -35,7 +37,10 @@ namespace OsmSharp.Forms
 
         private LayerPrimitives layerUser;
         private LayerPrimitives layerAccuracy;
+        private GeoCoordinate lastKnownPosition;
+        private double lastKnownAccuracy;
         private Layer layerMap;
+        private Layer layerScale;
         private string tileUrl;
 
         //public delegate void MapChangedEvent(object sender);
@@ -58,10 +63,15 @@ namespace OsmSharp.Forms
             set
             {
                 if (mapView != value)
+                {
+                    if (mapView != null)
+                        mapView.MapMove -= MapMoved;
                     mapView = value;
+                    mapView.MapMove += MapMoved;
+                }
             }
         }
-        
+
         /// <summary>
         /// The used Map (containing the layers)
         /// </summary>
@@ -242,6 +252,26 @@ namespace OsmSharp.Forms
         public static readonly BindableProperty HasZoomEnabledProperty = BindableProperty.Create(nameof(HasZoomEnabled), typeof(bool), typeof(OsmMap), true);
 
         /// <summary>
+        /// Gets/Sets the flag for showing a scale on the map.
+        /// </summary>
+        public bool HasScaleEnabled
+        {
+            get { return (bool)this.GetValue(HasScaleEnabledProperty); }
+            set
+            {
+                this.SetValue(HasScaleEnabledProperty, value);
+
+                if (mapView != null)
+                    mapView.MapAllowZoom = value;
+            }
+        }
+
+        /// <summary>
+        /// Bindable Property of <see cref="HasScaleEnabled"/>
+        /// </summary>
+        public static readonly BindableProperty HasScaleEnabledProperty = BindableProperty.Create(nameof(HasScaleEnabled), typeof(bool), typeof(OsmMap), true);
+
+        /// <summary>
         /// Gets/Sets the flag for showing position of user on map.
         /// </summary>
         public bool IsShowingUser
@@ -255,36 +285,30 @@ namespace OsmSharp.Forms
                 {
                     if (value)
                     {
-                        layerAccuracy = layerAccuracy ?? new LayerPrimitives(map.Projection);
-
-                        map.AddLayer(layerAccuracy);
-
-                        layerUser = layerUser ?? new LayerPrimitives(map.Projection);
-
-                        layerUser.AddPoint(MapCenter.Center.ToGeoCoordinate(), mapView.Density * 2.2f, SimpleColor.FromKnownColor(KnownColor.Blue).Value);
-                        layerUser.AddPoint(MapCenter.Center.ToGeoCoordinate(), mapView.Density * 1.8f, SimpleColor.FromKnownColor(KnownColor.White).Value);
-                        layerUser.AddPoint(MapCenter.Center.ToGeoCoordinate(), mapView.Density * 1.2f, SimpleColor.FromKnownColor(KnownColor.Blue).Value);
+                        DrawUserIcon(lastKnownPosition, 50);
 
                         CrossGeolocator.Current.PositionChanged += UserPositionChanged;
 
                         if (!CrossGeolocator.Current.IsListening)
                             CrossGeolocator.Current.StartListeningAsync(100, 2.0);
-
-                        map.AddLayer(layerUser);
                     }
                     else
                     {
                         if (layerUser != null)
+                        {
                             map.RemoveLayer(layerUser);
 
-                        layerUser.Close();
-                        layerUser = null;
+                            layerUser.Close();
+                            layerUser = null;
+                        }
 
                         if (layerAccuracy != null)
+                        {
                             map.RemoveLayer(layerAccuracy);
 
-                        layerAccuracy.Close();
-                        layerAccuracy = null;
+                            layerAccuracy.Close();
+                            layerAccuracy = null;
+                        }
                     }
                 }
             }
@@ -301,7 +325,15 @@ namespace OsmSharp.Forms
         public bool IsShowingUserInCenter
         {
             get { return (bool)this.GetValue(IsShowingUserInCenterProperty); }
-            set { this.SetValue(IsShowingUserInCenterProperty, value); }
+            set
+            {
+                this.SetValue(IsShowingUserInCenterProperty, value);
+
+                if (value)
+                {
+                    mapView.MapCenter = lastKnownPosition;
+                }
+            }
         }
 
         /// <summary>
@@ -356,6 +388,9 @@ namespace OsmSharp.Forms
         /// </summary>
         public static readonly BindableProperty MapTypeProperty = BindableProperty.Create(nameof(MapType), typeof(MapType), typeof(OsmMap), default(MapType));
 
+        /// <summary>
+        /// Returns a MapSpan with the actuell visible region of the map
+        /// </summary>
         public MapSpan VisibleRegion
         {
             get
@@ -378,8 +413,10 @@ namespace OsmSharp.Forms
             }
         }
 
+        #region Methods
+
         /// <summary>
-        ///  Move map to mapSpan
+        ///  Move map to region defined by a MapSpan
         /// </summary>
         /// <param name="mapSpan">MapSpan of the new region to display</param>
         public void MoveToRegion(MapSpan mapSpan)
@@ -393,14 +430,23 @@ namespace OsmSharp.Forms
             mapView.SetMapView(mapSpan.Center.ToGeoCoordinate(), mapView.MapTilt, (float)zoom);
         }
 
+        //public void AddPin(GeoCoordinate coord, string text)
+        //{
+        //    var layer = new LayerPrimitives();
+        //    layer.AddFeature(new Geo.Features.Feature( () { })
+        //}
 
-        public void AddLayerTile(string url = "http://a.tile.opencyclemap.org/cycle/{z}/{x}/{y}.png")
+        public void AddLayerTile(string url = "")
         {
             // Add MBTiles Layer.
             // any stream will do or any path on the device to a MBTiles SQLite databas
             // in this case the data is taken from the resource stream, written to disk and then opened.
             //map.AddLayer(new LayerMBTile(SQLiteConnection.CreateFrom(
             //            Assembly.GetExecutingAssembly().GetManifestResourceStream(@"YOUR MB TILES FILE HERE"), "map")));
+
+            if (string.IsNullOrEmpty(url))
+                return;
+
             tileUrl = url;
 
             if (layerMap != null)
@@ -409,22 +455,24 @@ namespace OsmSharp.Forms
             layerMap = map?.AddLayerTile(tileUrl);
         }
 
-        public void AddLayerOsm(Stream stream)
+        public void AddLayerOsm(Stream stream, Stream cssStream)
         {
             if (stream == null)
                 return;
 
-            // Get assembly
-            var assembly = typeof(OsmMap).GetTypeInfo().Assembly;
-
             // Create the MapCSS image source, which is used as image source for areas of the map
             var imageSource = new MapCSSDictionaryImageSource();
 
-            // Load mapcss style interpreter.
-            var mapCSSInterpreter = new MapCSSInterpreter(assembly.GetManifestResourceStream("OsmSharp.Forms.MapCSS.Default.mapcss"), imageSource);
+			// Load mapcss style interpreter.
+			var mapCSSInterpreter = new MapCSSInterpreter(cssStream, imageSource);
 
             // Load data from pbf file into a memory data source
-            var source = MemoryDataSource.CreateFromPBFStream(stream);
+            var input = new PBFOsmStreamSource(stream);
+            //var filter = new OsmStreamFilterBoundingBox(mapView.MapBoundingBox);
+            //filter.RegisterSource(input);
+            //var source = MemoryDataSource.CreateFromPBFStream(input);
+            var source = MemoryDataSource.CreateFrom(input);
+            //var source = new MemoryDataSource();
 
             // If there is allready a layer with map, close it
             if (layerMap != null)
@@ -458,24 +506,79 @@ namespace OsmSharp.Forms
             });
         }
 
+        #endregion
+
         private void UserPositionChanged(object sender, PositionEventArgs e)
         {
-            if (layerUser != null && IsShowingUser)
-            {
-                var center = new GeoCoordinate(e.Position.Latitude, e.Position.Longitude);
+            // Calculate new center
+            var center = new GeoCoordinate(e.Position.Latitude, e.Position.Longitude);
 
-                layerUser.Clear();
+            if (IsShowingUser)
+                DrawUserIcon(center, e.Position.Accuracy);
+
+            // Save for later use
+            lastKnownPosition = center;
+            lastKnownAccuracy = e.Position.Accuracy;
+        }
+
+        private void DrawUserIcon(GeoCoordinate coord, double accuracy)
+        {
+            // If there no coordiantes, we have nothing to do
+            if (coord == null)
+                return;
+
+            if (layerAccuracy == null)
+            {
+                // Create layer for accuracy
+                layerAccuracy = new LayerPrimitives(map.Projection);
+                // Add new accuracy layer
+                map.AddLayer(layerAccuracy);
+            }
+
+            if (layerUser == null)
+            {
+                // Create layer for user icon
+                layerUser = new LayerPrimitives(map.Projection);
+                // Add layer for user icon
+                map.AddLayer(layerUser);
+            }
+
+            var repaintUserIcon = coord.Latitude != lastKnownPosition?.Latitude || coord.Longitude != lastKnownPosition?.Longitude;
+            var repaintAccuracy = true;
+
+            // Stop painting
+            layerAccuracy.Pause();
+            layerUser.Pause();
+
+            if (repaintAccuracy)
                 layerAccuracy.Clear();
 
-                if (IsShowingUserInCenter)
-                    mapView.MapCenter = center;
+            if (repaintUserIcon)
+                layerUser.Clear();
 
-                layerAccuracy.AddPoint(center, 2.2f + mapView.Density * (float)e.Position.Accuracy, SimpleColor.FromArgb(32, 0, 0, 255).Value);
+            if (IsShowingUserInCenter)
+                mapView.MapCenter = coord;
 
-                layerUser.AddPoint(center, mapView.Density * 2.2f, SimpleColor.FromKnownColor(KnownColor.Blue).Value);
-                layerUser.AddPoint(center, mapView.Density * 1.8f, SimpleColor.FromKnownColor(KnownColor.White).Value);
-                layerUser.AddPoint(center, mapView.Density * 1.2f, SimpleColor.FromKnownColor(KnownColor.Blue).Value);
+            if (repaintAccuracy)
+            {
+                var size = 2.2f + mapView.Density * (float)accuracy;
+                layerAccuracy.AddPoint(coord, size > 40 ? 40 : size, SimpleColor.FromArgb(32, 0, 0, 255).Value);
             }
+
+            if (repaintUserIcon)
+            {
+                layerUser.AddPoint(coord, mapView.Density * 2.2f, SimpleColor.FromKnownColor(KnownColor.Blue).Value);
+                layerUser.AddPoint(coord, mapView.Density * 1.8f, SimpleColor.FromKnownColor(KnownColor.White).Value);
+                layerUser.AddPoint(coord, mapView.Density * 1.2f, SimpleColor.FromKnownColor(KnownColor.Blue).Value);
+            }
+
+            layerAccuracy.Resume();
+            layerUser.Resume();
+        }
+
+        private void MapMoved(IMapView mapView, float newZoom, Degree newTilt, GeoCoordinate newCenter)
+        {
+            IsShowingUserInCenter = false;
         }
 
         protected override SizeRequest OnSizeRequest(double widthConstrain, double heightConstrain)
